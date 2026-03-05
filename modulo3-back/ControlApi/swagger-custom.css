@@ -1,0 +1,27 @@
+﻿.swagger-ui .topbar {
+    background-color: #1976d2;
+}
+
+.swagger-ui .info .title {
+    color: #1976d2;
+}
+
+.swagger-ui .opblock-tag {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.swagger-ui .opblock.opblock-get {
+    border-color: #4caf50;
+    background: rgba(76, 175, 80, 0.05);
+}
+
+.swagger-ui .opblock.opblock-post {
+    border-color: #2196f3;
+    background: rgba(33, 150, 243, 0.05);
+}
+
+.swagger-ui .btn.execute {
+    background-color: #1976d2;
+    border-color: #1976d2;
+}
