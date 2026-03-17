@@ -11,19 +11,20 @@ public class BroadcastReceiverService : BackgroundService
 {
     private readonly ILogger<BroadcastReceiverService> _logger;
     private readonly DataAggregationService _aggregationService;
-    private readonly ConcurrentQueue<string> _tcpPacketQueue;
     private readonly ConcurrentQueue<string> _udpPacketQueue;
+    private readonly ConcurrentQueue<Module6Packet> _module6Queue;
     private readonly CancellationTokenSource _cts;
-    private const int TcpPort = 5555;
-    private const int UdpPort = 5002;
+
+    private const int UdpPort = 4210;
+    private const int Module6UdpPort = 4211;
     private const int ProcessorThreadCount = 4;
 
     public BroadcastReceiverService(ILogger<BroadcastReceiverService> logger, DataAggregationService aggregationService)
     {
         _logger = logger;
         _aggregationService = aggregationService;
-        _tcpPacketQueue = new ConcurrentQueue<string>();
         _udpPacketQueue = new ConcurrentQueue<string>();
+        _module6Queue = new ConcurrentQueue<Module6Packet>();
         _cts = new CancellationTokenSource();
     }
 
@@ -33,103 +34,197 @@ public class BroadcastReceiverService : BackgroundService
 
         var tasks = new List<Task>
         {
-            Task.Run(() => StartTcpListener(stoppingToken), stoppingToken),
-            Task.Run(() => StartUdpListener(stoppingToken), stoppingToken)
+            Task.Run(() => StartUdpListener(stoppingToken), stoppingToken),
+            Task.Run(() => StartModule6UdpListener(stoppingToken), stoppingToken),
+            Task.Run(() => ProcessModule6Packets(stoppingToken), stoppingToken)
         };
 
         for (int i = 0; i < ProcessorThreadCount; i++)
-        {
-            tasks.Add(Task.Run(() => ProcessTcpPackets(stoppingToken), stoppingToken));
             tasks.Add(Task.Run(() => ProcessUdpPackets(stoppingToken), stoppingToken));
-        }
 
         await Task.WhenAll(tasks);
     }
 
-    private async Task StartTcpListener(CancellationToken cancellationToken)
-    {
-        var listener = new TcpListener(IPAddress.Any, TcpPort);
-        listener.Start();
-        _logger.LogInformation("TCP Listener iniciado na porta {Port}", TcpPort);
-
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var client = await listener.AcceptTcpClientAsync(cancellationToken);
-                _ = Task.Run(() => HandleTcpClient(client, cancellationToken), cancellationToken);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("TCP Listener encerrado");
-        }
-        finally
-        {
-            listener.Stop();
-        }
-    }
-
-    private async Task HandleTcpClient(TcpClient client, CancellationToken cancellationToken)
-    {
-        using (client)
-        {
-            var stream = client.GetStream();
-            var buffer = new byte[8192];
-
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    var bytesRead = await stream.ReadAsync(buffer, cancellationToken);
-                    if (bytesRead == 0) break;
-
-                    var packet = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    if (IsValidPacketFormat(packet, out var normalizedPacket))
-                    {
-                        _tcpPacketQueue.Enqueue(normalizedPacket);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Pacote TCP inválido recebido (formato incorreto). Pacote: {Packet}",
-                            packet.Length > 200 ? packet[..200] + "..." : packet);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro ao processar cliente TCP");
-            }
-        }
-    }
-
     private async Task StartUdpListener(CancellationToken cancellationToken)
     {
-        using var udpClient = new UdpClient(UdpPort);
-        _logger.LogInformation("UDP Listener iniciado na porta {Port}", UdpPort);
+        using var udpClient = new UdpClient();
+        udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, UdpPort));
+        udpClient.EnableBroadcast = true;
+
+        var localEndPoint = (IPEndPoint)udpClient.Client.LocalEndPoint!;
+        var networkInterfaces = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+            .ToList();
+
+        _logger.LogInformation("=== BroadcastReceiverService — Configurações de Escuta ===");
+        _logger.LogInformation("  Protocolo    : UDP");
+        _logger.LogInformation("  Endereço     : {Address} (qualquer interface)", localEndPoint.Address);
+        _logger.LogInformation("  Porta geral  : {Port} (MODULE1~MODULE5)", localEndPoint.Port);
+        _logger.LogInformation("  Porta Mód. 6 : {Port} (exclusiva)", Module6UdpPort);
+        _logger.LogInformation("  Broadcast    : habilitado");
+        _logger.LogInformation("  ReuseAddress : habilitado");
+        _logger.LogInformation("  Threads proc.: {Count} (fila UDP geral)", ProcessorThreadCount);
+        _logger.LogInformation("  Módulos válidos: MODULE1, MODULE2, MODULE3, MODULE4, MODULE5, MODULE6");
+        _logger.LogInformation("  Módulo 6 (# / !) na porta {Port} — aceito mas roteado para fila dedicada", UdpPort);
+        _logger.LogInformation("  Módulo 5 JSON — normalizado automaticamente se contiver 'critical_event_id' + 'cluster_size'");
+
+        _logger.LogInformation("=== Interfaces de rede ativas ===");
+        foreach (var iface in networkInterfaces)
+        {
+            var ipProps = iface.GetIPProperties();
+            var ipv4 = ipProps.UnicastAddresses
+                .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Select(a => a.Address.ToString());
+
+            _logger.LogInformation(
+                "  [{Type}] {Name} — IPs: {Ips}",
+                iface.NetworkInterfaceType, iface.Name, string.Join(", ", ipv4));
+        }
+
+        _logger.LogInformation("UDP Listener geral aguardando pacotes na porta {Port}...", UdpPort);
 
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
                 var result = await udpClient.ReceiveAsync(cancellationToken);
-                var packet = System.Text.Encoding.UTF8.GetString(result.Buffer);
+                var rawBytes = result.Buffer;
+                var packet = System.Text.Encoding.UTF8.GetString(rawBytes);
+                var sourceIp = result.RemoteEndPoint.Address.ToString();
+                var sourcePort = result.RemoteEndPoint.Port;
+
+                _logger.LogInformation(
+                    "[UDP:{Port} IN] De={SourceIp}:{SourcePort} | Tamanho={Size} bytes | HEX={Hex} | Raw='{Raw}'",
+                    UdpPort, sourceIp, sourcePort, rawBytes.Length,
+                    Convert.ToHexString(rawBytes),
+                    packet.Length > 300 ? packet[..300] + "..." : packet);
+
+                if (IsModule6Packet(packet))
+                {
+                    _logger.LogInformation(
+                        "[UDP:{Port} IN] → Roteado para fila Módulo 6 — De={SourceIp}:{SourcePort}",
+                        UdpPort, sourceIp, sourcePort);
+                    HandleModule6RawPacket(packet, sourceIp);
+                    continue;
+                }
 
                 if (IsValidPacketFormat(packet, out var normalizedPacket))
                 {
                     _udpPacketQueue.Enqueue(normalizedPacket);
+                    _logger.LogInformation(
+                        "[UDP:{Port} IN] → Enfileirado para processamento — De={SourceIp}:{SourcePort} | Normalizado='{Normalized}'",
+                        UdpPort, sourceIp, sourcePort,
+                        normalizedPacket.Length > 300 ? normalizedPacket[..300] + "..." : normalizedPacket);
                 }
                 else
                 {
-                    _logger.LogWarning("Pacote UDP inválido recebido (formato incorreto). Pacote: {Packet}",
-                        packet.Length > 200 ? packet[..200] + "..." : packet);
+                    _logger.LogWarning(
+                        "[UDP:{Port} IN] → REJEITADO (formato inválido) — De={SourceIp}:{SourcePort} | Raw='{Packet}'",
+                        UdpPort, sourceIp, sourcePort,
+                        packet.Length > 300 ? packet[..300] + "..." : packet);
                 }
             }
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("UDP Listener encerrado");
+            _logger.LogInformation("UDP Listener geral (porta {Port}) encerrado", UdpPort);
+        }
+    }
+
+    /// <summary>
+    /// Listener dedicado exclusivamente ao Módulo 6 na porta 4211.
+    /// Isola o tráfego do ESP32 do restante dos módulos.
+    /// </summary>
+    private async Task StartModule6UdpListener(CancellationToken cancellationToken)
+    {
+        using var udpClient = new UdpClient();
+        udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, Module6UdpPort));
+        udpClient.EnableBroadcast = true;
+
+        _logger.LogInformation(
+            "UDP Listener Módulo 6 dedicado aguardando pacotes na porta {Port}...", Module6UdpPort);
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var result = await udpClient.ReceiveAsync(cancellationToken);
+                var rawBytes = result.Buffer;
+                var packet = System.Text.Encoding.UTF8.GetString(rawBytes);
+                var sourceIp = result.RemoteEndPoint.Address.ToString();
+                var sourcePort = result.RemoteEndPoint.Port;
+
+                _logger.LogInformation(
+                    "[UDP:{Port} IN][M6] De={SourceIp}:{SourcePort} | Tamanho={Size} bytes | HEX={Hex} | Raw='{Raw}'",
+                    Module6UdpPort, sourceIp, sourcePort, rawBytes.Length,
+                    Convert.ToHexString(rawBytes),
+                    packet.Length > 300 ? packet[..300] + "..." : packet);
+
+                if (!IsModule6Packet(packet))
+                {
+                    _logger.LogWarning(
+                        "[UDP:{Port} IN][M6] → REJEITADO — pacote não é do Módulo 6 — De={SourceIp}:{SourcePort} | Raw='{Raw}'",
+                        Module6UdpPort, sourceIp, sourcePort,
+                        packet.Length > 200 ? packet[..200] + "..." : packet);
+                    continue;
+                }
+
+                HandleModule6RawPacket(packet, sourceIp);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("UDP Listener Módulo 6 (porta {Port}) encerrado", Module6UdpPort);
+        }
+    }
+
+    private static bool IsModule6Packet(string packet)
+        => !string.IsNullOrEmpty(packet) && (packet.StartsWith('#') || packet.StartsWith('!'));
+
+    private void HandleModule6RawPacket(string raw, string sourceIp)
+    {
+        try
+        {
+            var parsed = Module6Packet.Parse(raw);
+            parsed.SourceIp = sourceIp;
+            _module6Queue.Enqueue(parsed);
+            _logger.LogInformation(
+                "[UDP IN][M6] Pacote Módulo 6 parseado — Raw='{Raw}' | IP={Ip} | Prefix={Prefix} | RecipientId={Id} | Cmd={Cmd} | State={State} | UniqueId={UniqueId}",
+                raw, sourceIp, parsed.Prefix, parsed.RecipientId, parsed.Command, parsed.State, parsed.UniqueId);
+        }
+        catch (FormatException ex)
+        {
+            _logger.LogWarning(
+                "[UDP IN][M6] Pacote Módulo 6 com formato inválido — Motivo={Reason} | Raw='{Raw}' | IP={Ip}",
+                ex.Message, raw, sourceIp);
+        }
+    }
+
+    private async Task ProcessModule6Packets(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (_module6Queue.TryDequeue(out var packet))
+            {
+                try
+                {
+                    await _aggregationService.ProcessModule6Packet(packet);
+                    _logger.LogInformation(
+                        "[UDP PROC][M6] Processado — RecipientId={Id} | Cmd={Cmd} | State={State} | IP={Ip}",
+                        packet.RecipientId, packet.Command, packet.State, packet.SourceIp);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "[UDP PROC][M6] Erro ao processar — Raw='{Raw}'", packet.RawPacket);
+                }
+            }
+            else
+            {
+                await Task.Delay(10, cancellationToken);
+            }
         }
     }
 
@@ -139,7 +234,7 @@ public class BroadcastReceiverService : BackgroundService
 
         if (string.IsNullOrWhiteSpace(packet))
         {
-            _logger.LogWarning("Pacote vazio ou nulo recebido");
+            _logger.LogWarning("[UDP VAL] Pacote vazio ou nulo recebido");
             return false;
         }
 
@@ -147,23 +242,63 @@ public class BroadcastReceiverService : BackgroundService
         {
             try
             {
-                if (packet.Contains("\"critical_event_id\"") && packet.Contains("\"cluster_size\""))
-                {
-                    _logger.LogInformation("Pacote JSON detectado (Módulo 5 - formato alternativo). Normalizando...");
+                var jsonNormalized = packet.Replace('\'', '"');
 
+                if (jsonNormalized.Contains("\"critical_event_id\"") && jsonNormalized.Contains("\"cluster_size\""))
+                {
+                    _logger.LogInformation("[UDP VAL] Pacote JSON Módulo 5 detectado — normalizando...");
                     var sequence = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     var timestamp = DateTime.UtcNow.ToString("O");
-                    normalizedPacket = $"MODULE5;{sequence};MODULE5;ALARM;{packet};{timestamp}";
-
-                    _logger.LogDebug("Pacote normalizado: {Packet}",
-                        normalizedPacket.Length > 200 ? normalizedPacket[..200] + "..." : normalizedPacket);
-
+                    normalizedPacket = $"MODULE5;{sequence};MODULE5;ALARM;{jsonNormalized};{timestamp}";
+                    _logger.LogInformation(
+                        "[UDP VAL] JSON Módulo 5 normalizado — Seq={Seq} | Normalizado='{Normalized}'",
+                        sequence,
+                        normalizedPacket.Length > 300 ? normalizedPacket[..300] + "..." : normalizedPacket);
                     return true;
                 }
+
+                // Formato do dispositivo real: {'Ia':100,'Ib':100,'Ic':100,'numPacote':10916,'idDispositivo':1}
+                if (jsonNormalized.Contains("\"Ia\"") && jsonNormalized.Contains("\"idDispositivo\""))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(jsonNormalized);
+                    var root = doc.RootElement;
+
+                    var deviceId = $"IED-{root.GetProperty("idDispositivo").GetInt32():D3}";
+                    var sequence = root.GetProperty("numPacote").GetInt64();
+                    var ia = root.GetProperty("Ia").GetDouble();
+                    var ib = root.TryGetProperty("Ib", out var ibEl) ? ibEl.GetDouble() : ia;
+                    var ic = root.TryGetProperty("Ic", out var icEl) ? icEl.GetDouble() : ia;
+                    var current = (ia + ib + ic) / 3.0;
+                    var timestamp = DateTime.UtcNow.ToString("O");
+
+                    var data = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        Voltage = 220.0,   // não fornecido pelo dispositivo
+                        Current = current,
+                        Frequency = 60.0,    // não fornecido pelo dispositivo
+                        PowerFactor = 1.0,     // não fornecido pelo dispositivo
+                        Status = "NORMAL",
+                        Ia = ia,
+                        Ib = ib,
+                        Ic = ic
+                    });
+
+                    normalizedPacket = $"{deviceId};{sequence};MODULE1;MEASUREMENT;{data};{timestamp}";
+
+                    _logger.LogInformation(
+                        "[UDP VAL] Pacote dispositivo real normalizado — Device={Device} | Seq={Seq} | Ia={Ia} | Ib={Ib} | Ic={Ic}",
+                        deviceId, sequence, ia, ib, ic);
+                    return true;
+                }
+
+                _logger.LogWarning(
+                    "[UDP VAL] JSON recebido mas formato não reconhecido — REJEITADO | Raw='{Raw}'",
+                    packet.Length > 200 ? packet[..200] + "..." : packet);
+                return false;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Erro ao tentar normalizar JSON: {Packet}",
+                _logger.LogWarning(ex, "[UDP VAL] Erro ao normalizar JSON — Raw='{Packet}'",
                     packet.Length > 100 ? packet[..100] + "..." : packet);
                 return false;
             }
@@ -172,14 +307,16 @@ public class BroadcastReceiverService : BackgroundService
         var parts = packet.Split(';');
         if (parts.Length < 6)
         {
-            _logger.LogWarning("Pacote com número insuficiente de campos ({Count}). Esperado: 6. Pacote: {Packet}",
+            _logger.LogWarning(
+                "[UDP VAL] Campos insuficientes — Esperado=6 | Recebido={Count} | Raw='{Packet}'",
                 parts.Length, packet.Length > 200 ? packet[..200] + "..." : packet);
             return false;
         }
 
         if (!long.TryParse(parts[1], out _))
         {
-            _logger.LogWarning("Campo SEQUENCIA inválido: '{Sequence}'. Pacote: {Packet}",
+            _logger.LogWarning(
+                "[UDP VAL] Sequência inválida — Campo[1]='{Sequence}' | Raw='{Packet}'",
                 parts[1], packet.Length > 200 ? packet[..200] + "..." : packet);
             return false;
         }
@@ -187,38 +324,14 @@ public class BroadcastReceiverService : BackgroundService
         var validModules = new[] { "MODULE1", "MODULE2", "MODULE3", "MODULE4", "MODULE5", "MODULE6" };
         if (!validModules.Contains(parts[2]))
         {
-            _logger.LogWarning("Módulo inválido: '{Module}'. Módulos válidos: {ValidModules}. Pacote: {Packet}",
-                parts[2], string.Join(", ", validModules), packet.Length > 200 ? packet[..200] + "..." : packet);
+            _logger.LogWarning(
+                "[UDP VAL] Módulo inválido — Campo[2]='{Module}' | Válidos=[{Valid}] | Raw='{Packet}'",
+                parts[2], string.Join(", ", validModules),
+                packet.Length > 200 ? packet[..200] + "..." : packet);
             return false;
         }
 
         return true;
-    }
-
-    private async Task ProcessTcpPackets(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (_tcpPacketQueue.TryDequeue(out var rawPacket))
-            {
-                try
-                {
-                    var packet = BroadcastPacket.Parse(rawPacket);
-                    await _aggregationService.ProcessPacket(packet);
-                    _logger.LogDebug("Pacote TCP processado: {Origin} | {Module} | {Op}",
-                        packet.Origin, packet.Module, packet.OperationType);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Erro ao processar pacote TCP: {Packet}",
-                        rawPacket.Length > 100 ? rawPacket[..100] : rawPacket);
-                }
-            }
-            else
-            {
-                await Task.Delay(10, cancellationToken);
-            }
-        }
     }
 
     private async Task ProcessUdpPackets(CancellationToken cancellationToken)
@@ -231,13 +344,15 @@ public class BroadcastReceiverService : BackgroundService
                 {
                     var packet = BroadcastPacket.Parse(rawPacket);
                     await _aggregationService.ProcessPacket(packet);
-                    _logger.LogDebug("Pacote UDP processado: {Origin} | {Module} | {Op}",
-                        packet.Origin, packet.Module, packet.OperationType);
+                    _logger.LogInformation(
+                        "[UDP PROC] Processado — Origin={Origin} | Module={Module} | Op={Op} | Seq={Seq} | Timestamp={Ts}",
+                        packet.Origin, packet.Module, packet.OperationType, packet.Sequence, packet.Timestamp.ToString("O"));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Erro ao processar pacote UDP: {Message}. Pacote: {Packet}",
-                        ex.Message, rawPacket.Length > 100 ? rawPacket[..100] : rawPacket);
+                    _logger.LogError(ex,
+                        "[UDP PROC] Erro ao processar — Raw='{Packet}'",
+                        rawPacket.Length > 200 ? rawPacket[..200] : rawPacket);
                 }
             }
             else

@@ -13,7 +13,7 @@ public class ModuleSimulator
     private readonly bool _useTcp;
     private long _sequence = 0;
 
-    public ModuleSimulator(string moduleId, string host = "localhost", int port = 5002, bool useTcp = false)
+    public ModuleSimulator(string moduleId, string host = "127.0.0.1", int port = 4210, bool useTcp = false)
     {
         _moduleId = moduleId;
         _host = host;
@@ -35,31 +35,69 @@ public class ModuleSimulator
         await SendPacket(deviceId, "MODULE1", "MEASUREMENT", data);
     }
 
-    public async Task SendProtectionEvent(string deviceId, string eventType, string severity, bool isStart = true)
+    /// <summary>
+    /// Envia evento de proteção do MODULE2 com metadados numéricos reais.
+    /// </summary>
+    public async Task SendProtectionEvent(
+        string deviceId,
+        string eventType,
+        string severity,
+        bool isStart,
+        string phase = "A",
+        string function = "50",
+        double pickupA = 5.0,
+        double measuredA = 0.0,
+        string? duration = null,
+        string? resolvedBy = null)
     {
+        object metadata;
+
+        if (isStart)
+        {
+            // EVENT_START não tem Duration nem ResolvedBy
+            metadata = new
+            {
+                Function = function,
+                Phase = phase,
+                PickupA = pickupA,
+                MeasuredA = measuredA > 0 ? measuredA : pickupA * (1.1 + Random.Shared.NextDouble() * 0.5),
+                ThresholdExceeded = $"{(int)((measuredA / pickupA) * 100)}%"
+            };
+        }
+        else
+        {
+            // EVENT_END tem Duration e ResolvedBy
+            metadata = new
+            {
+                Function = function,
+                Phase = phase,
+                PickupA = pickupA,
+                MeasuredA = measuredA > 0 ? measuredA : pickupA * (0.3 + Random.Shared.NextDouble() * 0.3),
+                ThresholdExceeded = $"{(int)((measuredA / pickupA) * 100)}%",
+                Duration = duration ?? $"{Random.Shared.Next(300, 700)}ms",
+                ResolvedBy = resolvedBy ?? "AUTO"
+            };
+        }
+
         var data = JsonSerializer.Serialize(new
         {
             EventType = eventType,
             Severity = severity,
-            Metadata = new Dictionary<string, string>
-            {
-                { "Location", "Bay-A" },
-                { "Phase", "ABC" }
-            }
+            Metadata = metadata
         });
 
         var operationType = isStart ? "EVENT_START" : "EVENT_END";
         await SendPacket(deviceId, "MODULE2", operationType, data);
     }
 
-    public async Task SendEventReport(string eventType, int totalCount, Dictionary<string, int> countByDevice)
+    public async Task SendEventReport(string eventType, int totalCount, Dictionary<string, int> countByDevice, string windowDuration = "30s")
     {
         var data = JsonSerializer.Serialize(new
         {
             EventType = eventType,
             TotalCount = totalCount,
             CountByDevice = countByDevice,
-            WindowDuration = "00:01:00"
+            WindowDuration = windowDuration
         });
 
         await SendPacket(_moduleId, "MODULE4", "REPORT", data);
@@ -82,33 +120,18 @@ public class ModuleSimulator
         await SendPacket(_moduleId, "MODULE5", "ALARM", data);
     }
 
-    public async Task SendStateUpdate(string deviceId, string state)
-    {
-        var data = JsonSerializer.Serialize(new Dictionary<string, string>
-        {
-            { "DeviceId", deviceId },
-            { "State", state }
-        });
-
-        await SendPacket(deviceId, "MODULE6", "STATE_UPDATE", data);
-    }
-
     private async Task SendPacket(string origin, string module, string operationType, string data)
     {
-            var sequence = Interlocked.Increment(ref _sequence);
-            var timestamp = DateTime.UtcNow;
+        var sequence = Interlocked.Increment(ref _sequence);
+        var timestamp = DateTime.UtcNow;
         var packet = $"{origin};{sequence};{module};{operationType};{data};{timestamp:O}";
 
         try
         {
             if (_useTcp)
-            {
                 await SendViaTcp(packet);
-            }
             else
-            {
                 await SendViaUdp(packet);
-            }
 
             Console.WriteLine($"[{module}] Pacote enviado: {origin} | Seq: {sequence} | Op: {operationType}");
         }
@@ -130,18 +153,18 @@ public class ModuleSimulator
     private async Task SendViaUdp(string packet)
     {
         using var client = new UdpClient();
+        client.EnableBroadcast = true;
         var bytes = Encoding.UTF8.GetBytes(packet);
 
         IPAddress ipAddress;
         if (IPAddress.TryParse(_host, out var parsedIp))
-        {
             ipAddress = parsedIp;
-        }
         else
         {
             var hostEntry = await Dns.GetHostEntryAsync(_host);
-            ipAddress = hostEntry.AddressList.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
-                        ?? hostEntry.AddressList.First();
+            ipAddress = hostEntry.AddressList
+                .FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                ?? hostEntry.AddressList.First();
         }
 
         var endpoint = new IPEndPoint(ipAddress, _port);

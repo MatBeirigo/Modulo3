@@ -91,3 +91,37 @@ export interface ProblemDetails {
   detail?: string;
   instance?: string;
 }
+
+// Module 6 - Relay types
+export interface ConfigureModuleRequest {
+  newId: number;
+  uniqueId: string;
+}
+
+export interface ConfigureModuleResponse {
+  message: string;
+}
+
+export interface RelayCommandResponse {
+  message: string;
+}
+
+export interface RelayStateResponse {
+  message: string;
+}
+
+export type RelayState = 'OPEN' | 'CLOSED' | 'UNKNOWN';
+
+export interface Module6Status {
+  moduleId: number;
+  uniqueId: string;
+  relayState: RelayState;
+  lastUpdate: string;
+  isOnline: boolean;
+}
+
+export interface Module6Info {
+  uniqueId: string;
+  moduleId?: number;
+  lastSeen?: string;
+}

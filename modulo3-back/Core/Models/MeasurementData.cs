@@ -1,4 +1,6 @@
-﻿using System.Text.Json.Serialization;
+﻿using Core.Converters;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Core.Models;
 
@@ -12,6 +14,13 @@ public class MeasurementData
     public double PowerFactor { get; set; }
     public long Sequence { get; set; }
     public string Status { get; set; }
+
+    /// <summary>Corrente fase A — presente em pacotes de dispositivos reais</summary>
+    public double? Ia { get; set; }
+    /// <summary>Corrente fase B — presente em pacotes de dispositivos reais</summary>
+    public double? Ib { get; set; }
+    /// <summary>Corrente fase C — presente em pacotes de dispositivos reais</summary>
+    public double? Ic { get; set; }
 }
 
 public class ProtectionEvent
@@ -22,7 +31,7 @@ public class ProtectionEvent
     public string EventType { get; set; }
     public string Severity { get; set; }
     public bool IsActive { get; set; }
-    public Dictionary<string, string> Metadata { get; set; }
+    public Dictionary<string, JsonElement> Metadata { get; set; }
 }
 
 public class FilteredEventReport
@@ -31,6 +40,8 @@ public class FilteredEventReport
     public int TotalCount { get; set; }
     public Dictionary<string, int> CountByDevice { get; set; }
     public DateTime ReportTimestamp { get; set; }
+
+    [JsonConverter(typeof(TimeSpanJsonConverter))]
     public TimeSpan WindowDuration { get; set; }
 }
 

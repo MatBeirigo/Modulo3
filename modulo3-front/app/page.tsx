@@ -14,35 +14,22 @@ import { MeasurementsTable } from '@/components/MeasurementsTable';
 import { EventReportsTable } from '@/components/EventReportsTable';
 import { CommandPanel } from '@/components/CommandPanel';
 import { SystemMetrics } from '@/components/SystemMetrics';
-import { DataControls } from '@/components/DataControls';
+import { Module6Manager } from '@/components/Module6Manager';
+import { HistoricalCharts } from '@/components/HistoricalCharts';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Activity, AlertCircle, Loader2, BarChart3, Zap, Bell, Settings } from 'lucide-react';
+import { Activity, AlertCircle, Loader2, BarChart3, Zap, Bell, Radio, History } from 'lucide-react';
 
 export default function Home() {
   const [isPaused, setIsPaused] = useState(false);
 
-  const { data: realTimeData, loading: rtLoading, error: rtError, refetch: refetchRealTime, clear: clearRealTime } = useRealTimeData(2000, isPaused);
-  const { devices, loading: devicesLoading, error: devicesError, refetch: refetchDevices, clear: clearDevices } = useDevices(3000, isPaused);
-  const { alarms, loading: alarmsLoading, error: alarmsError, refetch: refetchAlarms, clear: clearAlarms } = useAlarms(5000, isPaused);
-  const { reports, loading: reportsLoading, error: reportsError, refetch: refetchReports, clear: clearReports } = useEventReports(5000, isPaused);
+  const { data: realTimeData, loading: rtLoading, error: rtError } = useRealTimeData(2000, isPaused);
+  const { devices, loading: devicesLoading, error: devicesError } = useDevices(3000, isPaused);
+  const { alarms, loading: alarmsLoading, error: alarmsError } = useAlarms(5000, isPaused);
+  const { reports, loading: reportsLoading, error: reportsError } = useEventReports(5000, isPaused);
 
   const isLoading = rtLoading && devicesLoading && alarmsLoading && reportsLoading;
   const hasError = rtError || devicesError || alarmsError || reportsError;
-
-  const handleReload = () => {
-    refetchRealTime();
-    refetchDevices();
-    refetchAlarms();
-    refetchReports();
-  };
-
-  const handleClear = () => {
-    clearRealTime();
-    clearDevices();
-    clearAlarms();
-    clearReports();
-  };
 
   const handleTogglePause = () => {
     setIsPaused(!isPaused);
@@ -98,27 +85,32 @@ export default function Home() {
           </div>
         ) : (
           <Tabs defaultValue="visao-geral" className="space-y-6">
-            <TabsList className="grid w-full grid-cols-5 lg:w-auto">
+            <TabsList className="grid w-full grid-cols-6 lg:w-auto">
               <TabsTrigger value="visao-geral" className="flex items-center gap-2">
                 <BarChart3 className="h-4 w-4" />
                 Visão Geral
               </TabsTrigger>
               <TabsTrigger value="tempo-real" className="flex items-center gap-2">
                 <Zap className="h-4 w-4" />
-                Tempo Real
+                Tempo Real (M1)
               </TabsTrigger>
               <TabsTrigger value="eventos" className="flex items-center gap-2">
                 <Activity className="h-4 w-4" />
-                Eventos
+                Eventos (M2)
               </TabsTrigger>
               <TabsTrigger value="alarmes" className="flex items-center gap-2">
                 <Bell className="h-4 w-4" />
-                Alarmes
+                Alarmes (M5)
               </TabsTrigger>
-              <TabsTrigger value="controle" className="flex items-center gap-2">
-                <Settings className="h-4 w-4" />
-                Controle
+              <TabsTrigger value="modulo6" className="flex items-center gap-2">
+                <Radio className="h-4 w-4" />
+                Relés (M6)
               </TabsTrigger>
+              <TabsTrigger value="historico" className="flex items-center gap-2">
+                <History className="h-4 w-4" />
+                Histórico
+              </TabsTrigger>
+
             </TabsList>
 
             <TabsContent value="visao-geral" className="space-y-6">
@@ -174,29 +166,25 @@ export default function Home() {
               </section>
             </TabsContent>
 
-            <TabsContent value="controle" className="space-y-6">
+            <TabsContent value="modulo6" className="space-y-6">
               <section>
-                <h2 className="text-xl font-semibold mb-4">Controles de Dados de Teste</h2>
-                <DataControls
-                  onReload={handleReload}
-                  onClear={handleClear}
-                  isPaused={isPaused}
-                  onTogglePause={handleTogglePause}
-                />
-              </section>
-
-              <section>
-                <h2 className="text-xl font-semibold mb-4">Painel de Controle</h2>
-                <CommandPanel deviceIds={devices.map(d => d.deviceId)} />
+                <h2 className="text-xl font-semibold mb-4">Módulo 6 - Gerenciamento de Relés</h2>
+                <Module6Manager isPaused={isPaused} />
               </section>
             </TabsContent>
+
+            <TabsContent value="historico" className="space-y-6">
+              <HistoricalCharts devices={devices} />
+            </TabsContent>
+
+
           </Tabs>
         )}
       </main>
 
       <footer className="border-t mt-12">
         <div className="container mx-auto px-4 py-4 text-center text-sm text-muted-foreground">
-          Sistema de Monitoramento de Subestações - Módulo 3 - v1.0
+          Sistema de Monitoramento de Subestações - Módulo 3 - v2.0
         </div>
       </footer>
     </div>

@@ -180,4 +180,30 @@ public class MonitoringController : ControllerBase
 
         return Ok(alarms);
     }
+
+    [HttpGet("events/history")]
+    [ProducesResponseType(typeof(List<ProtectionEventDto>), StatusCodes.Status200OK)]
+    public ActionResult<List<ProtectionEventDto>> GetEventHistory(
+    [FromQuery] string? deviceId = null,
+    [FromQuery] int limit = 100,
+    [FromQuery] DateTime? startTime = null,
+    [FromQuery] DateTime? endTime = null)
+    {
+        if (limit <= 0 || limit > 500)
+            return BadRequest(new { Message = "O parâmetro 'limit' deve estar entre 1 e 500." });
+
+        var events = _aggregationService.GetEventHistory(deviceId, limit, startTime, endTime)
+            .Select(e => new ProtectionEventDto
+            {
+                DeviceId = e.DeviceId,
+                StartTime = e.StartTime,
+                EndTime = e.EndTime,
+                EventType = e.EventType,
+                Severity = e.Severity,
+                IsActive = e.IsActive
+            })
+            .ToList();
+
+        return Ok(events);
+    }
 }
