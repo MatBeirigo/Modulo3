@@ -25,9 +25,6 @@ public class Module6Controller : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>
-    /// Lista todos os módulos configurados com seus estados atuais de relé.
-    /// </summary>
     [HttpGet("modules")]
     [ProducesResponseType(typeof(List<Module6StatusDto>), StatusCodes.Status200OK)]
     public ActionResult<List<Module6StatusDto>> GetConfiguredModules()
@@ -36,9 +33,6 @@ public class Module6Controller : ControllerBase
         return Ok(modules);
     }
 
-    /// <summary>
-    /// Lista os módulos que enviaram broadcast UDP sem configuração de ID.
-    /// </summary>
     [HttpGet("unconfigured")]
     [ProducesResponseType(typeof(List<string>), StatusCodes.Status200OK)]
     public ActionResult<List<string>> GetUnconfiguredModules()
@@ -47,10 +41,6 @@ public class Module6Controller : ControllerBase
         return Ok(modules);
     }
 
-    /// <summary>
-    /// Configura o ID de um módulo sem configuração via TCP.
-    /// Envia: #00;9;{newId};{uniqueId}
-    /// </summary>
     [HttpPost("configure")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -76,9 +66,6 @@ public class Module6Controller : ControllerBase
         return Ok(new { Message = $"ID {request.NewId:D2} configurado para UniqueID {request.UniqueId}." });
     }
 
-    /// <summary>
-    /// Fecha o relé de um módulo. Envia: #moduleId;1;00
-    /// </summary>
     [HttpPost("{moduleId:int}/relay/close")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status502BadGateway)]
@@ -93,9 +80,6 @@ public class Module6Controller : ControllerBase
         return Ok(new { Message = $"Comando fechar relé enviado para módulo {moduleId:D2}." });
     }
 
-    /// <summary>
-    /// Abre o relé de um módulo. Envia: #moduleId;2;00
-    /// </summary>
     [HttpPost("{moduleId:int}/relay/open")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status502BadGateway)]
@@ -110,9 +94,6 @@ public class Module6Controller : ControllerBase
         return Ok(new { Message = $"Comando abrir relé enviado para módulo {moduleId:D2}." });
     }
 
-    /// <summary>
-    /// Consulta o estado do relé de um módulo. Envia: #moduleId;3;99
-    /// </summary>
     [HttpGet("{moduleId:int}/relay/state")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status502BadGateway)]

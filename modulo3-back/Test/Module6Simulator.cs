@@ -7,7 +7,6 @@ namespace Test;
 
 public class Module6Simulator
 {
-    // Estados dos relés: chave = ID numérico do módulo, valor = "01" (fechado) ou "00" (aberto)
     private readonly Dictionary<int, string> _relayStates = new();
     private readonly Dictionary<int, string> _uniqueIds = new();
 

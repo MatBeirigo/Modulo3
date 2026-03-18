@@ -1,9 +1,10 @@
-﻿using System.Net;
-using System.Net.Sockets;
-using System.Collections.Concurrent;
+﻿using Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Core.Models;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading.Channels;
 
 namespace Services;
 
@@ -11,20 +12,17 @@ public class BroadcastReceiverService : BackgroundService
 {
     private readonly ILogger<BroadcastReceiverService> _logger;
     private readonly DataAggregationService _aggregationService;
-    private readonly ConcurrentQueue<string> _udpPacketQueue;
-    private readonly ConcurrentQueue<Module6Packet> _module6Queue;
+    private readonly ConcurrentDictionary<string, Channel<string>> _deviceChannels = new();
+    private readonly ConcurrentDictionary<string, Channel<Module6Packet>> _module6Channels = new();
     private readonly CancellationTokenSource _cts;
 
     private const int UdpPort = 4210;
     private const int Module6UdpPort = 4211;
-    private const int ProcessorThreadCount = 4;
 
     public BroadcastReceiverService(ILogger<BroadcastReceiverService> logger, DataAggregationService aggregationService)
     {
         _logger = logger;
         _aggregationService = aggregationService;
-        _udpPacketQueue = new ConcurrentQueue<string>();
-        _module6Queue = new ConcurrentQueue<Module6Packet>();
         _cts = new CancellationTokenSource();
     }
 
@@ -32,17 +30,10 @@ public class BroadcastReceiverService : BackgroundService
     {
         _logger.LogInformation("BroadcastReceiverService iniciado");
 
-        var tasks = new List<Task>
-        {
+        await Task.WhenAll(
             Task.Run(() => StartUdpListener(stoppingToken), stoppingToken),
-            Task.Run(() => StartModule6UdpListener(stoppingToken), stoppingToken),
-            Task.Run(() => ProcessModule6Packets(stoppingToken), stoppingToken)
-        };
-
-        for (int i = 0; i < ProcessorThreadCount; i++)
-            tasks.Add(Task.Run(() => ProcessUdpPackets(stoppingToken), stoppingToken));
-
-        await Task.WhenAll(tasks);
+            Task.Run(() => StartModule6UdpListener(stoppingToken), stoppingToken)
+        );
     }
 
     private async Task StartUdpListener(CancellationToken cancellationToken)
@@ -64,7 +55,7 @@ public class BroadcastReceiverService : BackgroundService
         _logger.LogInformation("  Porta Mód. 6 : {Port} (exclusiva)", Module6UdpPort);
         _logger.LogInformation("  Broadcast    : habilitado");
         _logger.LogInformation("  ReuseAddress : habilitado");
-        _logger.LogInformation("  Threads proc.: {Count} (fila UDP geral)", ProcessorThreadCount);
+        _logger.LogInformation("  Modelo       : thread dedicada por dispositivo (Channel<T>)");
         _logger.LogInformation("  Módulos válidos: MODULE1, MODULE2, MODULE3, MODULE4, MODULE5, MODULE6");
         _logger.LogInformation("  Módulo 6 (# / !) na porta {Port} — aceito mas roteado para fila dedicada", UdpPort);
         _logger.LogInformation("  Módulo 5 JSON — normalizado automaticamente se contiver 'critical_event_id' + 'cluster_size'");
@@ -111,11 +102,13 @@ public class BroadcastReceiverService : BackgroundService
 
                 if (IsValidPacketFormat(packet, out var normalizedPacket))
                 {
-                    _udpPacketQueue.Enqueue(normalizedPacket);
+                    var origin = normalizedPacket.Split(';')[0];
+                    var channel = GetOrCreateDeviceChannel(origin);
+                    await channel.Writer.WriteAsync(normalizedPacket, cancellationToken);
+
                     _logger.LogInformation(
-                        "[UDP:{Port} IN] → Enfileirado para processamento — De={SourceIp}:{SourcePort} | Normalizado='{Normalized}'",
-                        UdpPort, sourceIp, sourcePort,
-                        normalizedPacket.Length > 300 ? normalizedPacket[..300] + "..." : normalizedPacket);
+                        "[UDP:{Port} IN] → Enfileirado para dispositivo '{Origin}' — De={SourceIp}:{SourcePort}",
+                        UdpPort, origin, sourceIp, sourcePort);
                 }
                 else
                 {
@@ -132,10 +125,6 @@ public class BroadcastReceiverService : BackgroundService
         }
     }
 
-    /// <summary>
-    /// Listener dedicado exclusivamente ao Módulo 6 na porta 4211.
-    /// Isola o tráfego do ESP32 do restante dos módulos.
-    /// </summary>
     private async Task StartModule6UdpListener(CancellationToken cancellationToken)
     {
         using var udpClient = new UdpClient();
@@ -180,6 +169,108 @@ public class BroadcastReceiverService : BackgroundService
         }
     }
 
+    private Channel<string> GetOrCreateDeviceChannel(string origin)
+    {
+        return _deviceChannels.GetOrAdd(origin, key =>
+        {
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false
+            });
+
+            _logger.LogInformation(
+                "[THREAD] Novo dispositivo detectado — '{Origin}'. Thread dedicada criada.", key);
+
+            _ = Task.Run(() => ProcessDevicePackets(key, channel.Reader, _cts.Token));
+
+            return channel;
+        });
+    }
+
+    private Channel<Module6Packet> GetOrCreateModule6Channel(string deviceKey)
+    {
+        return _module6Channels.GetOrAdd(deviceKey, key =>
+        {
+            var channel = Channel.CreateUnbounded<Module6Packet>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false
+            });
+
+            _logger.LogInformation(
+                "[THREAD][M6] Novo dispositivo Módulo 6 detectado — '{DeviceKey}'. Thread dedicada criada.", key);
+
+            _ = Task.Run(() => ProcessModule6DevicePackets(key, channel.Reader, _cts.Token));
+
+            return channel;
+        });
+    }
+
+    private async Task ProcessDevicePackets(string origin, ChannelReader<string> reader, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("[THREAD] Thread do dispositivo '{Origin}' iniciada.", origin);
+
+        try
+        {
+            await foreach (var rawPacket in reader.ReadAllAsync(cancellationToken))
+            {
+                try
+                {
+                    var packet = BroadcastPacket.Parse(rawPacket);
+                    await _aggregationService.ProcessPacket(packet);
+                    _logger.LogInformation(
+                        "[UDP PROC] Processado — Origin={Origin} | Module={Module} | Op={Op} | Seq={Seq} | Timestamp={Ts}",
+                        packet.Origin, packet.Module, packet.OperationType, packet.Sequence, packet.Timestamp.ToString("O"));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "[UDP PROC] Erro ao processar — Origin={Origin} | Raw='{Packet}'",
+                        origin,
+                        rawPacket.Length > 200 ? rawPacket[..200] : rawPacket);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            
+        }
+
+        _logger.LogInformation("[THREAD] Thread do dispositivo '{Origin}' encerrada.", origin);
+    }
+
+    private async Task ProcessModule6DevicePackets(string deviceKey, ChannelReader<Module6Packet> reader, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("[THREAD][M6] Thread do dispositivo Módulo 6 '{DeviceKey}' iniciada.", deviceKey);
+
+        try
+        {
+            await foreach (var packet in reader.ReadAllAsync(cancellationToken))
+            {
+                try
+                {
+                    await _aggregationService.ProcessModule6Packet(packet);
+                    _logger.LogInformation(
+                        "[UDP PROC][M6] Processado — DeviceKey={DeviceKey} | RecipientId={Id} | Cmd={Cmd} | State={State} | IP={Ip}",
+                        deviceKey, packet.RecipientId, packet.Command, packet.State, packet.SourceIp);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "[UDP PROC][M6] Erro ao processar — DeviceKey={DeviceKey} | Raw='{Raw}'",
+                        deviceKey, packet.RawPacket);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            
+        }
+
+        _logger.LogInformation("[THREAD][M6] Thread do dispositivo Módulo 6 '{DeviceKey}' encerrada.", deviceKey);
+    }
+
     private static bool IsModule6Packet(string packet)
         => !string.IsNullOrEmpty(packet) && (packet.StartsWith('#') || packet.StartsWith('!'));
 
@@ -189,7 +280,11 @@ public class BroadcastReceiverService : BackgroundService
         {
             var parsed = Module6Packet.Parse(raw);
             parsed.SourceIp = sourceIp;
-            _module6Queue.Enqueue(parsed);
+
+            var deviceKey = $"MODULE6-{sourceIp}";
+            var channel = GetOrCreateModule6Channel(deviceKey);
+            channel.Writer.TryWrite(parsed);
+
             _logger.LogInformation(
                 "[UDP IN][M6] Pacote Módulo 6 parseado — Raw='{Raw}' | IP={Ip} | Prefix={Prefix} | RecipientId={Id} | Cmd={Cmd} | State={State} | UniqueId={UniqueId}",
                 raw, sourceIp, parsed.Prefix, parsed.RecipientId, parsed.Command, parsed.State, parsed.UniqueId);
@@ -199,32 +294,6 @@ public class BroadcastReceiverService : BackgroundService
             _logger.LogWarning(
                 "[UDP IN][M6] Pacote Módulo 6 com formato inválido — Motivo={Reason} | Raw='{Raw}' | IP={Ip}",
                 ex.Message, raw, sourceIp);
-        }
-    }
-
-    private async Task ProcessModule6Packets(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (_module6Queue.TryDequeue(out var packet))
-            {
-                try
-                {
-                    await _aggregationService.ProcessModule6Packet(packet);
-                    _logger.LogInformation(
-                        "[UDP PROC][M6] Processado — RecipientId={Id} | Cmd={Cmd} | State={State} | IP={Ip}",
-                        packet.RecipientId, packet.Command, packet.State, packet.SourceIp);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "[UDP PROC][M6] Erro ao processar — Raw='{Raw}'", packet.RawPacket);
-                }
-            }
-            else
-            {
-                await Task.Delay(10, cancellationToken);
-            }
         }
     }
 
@@ -257,7 +326,6 @@ public class BroadcastReceiverService : BackgroundService
                     return true;
                 }
 
-                // Formato do dispositivo real: {'Ia':100,'Ib':100,'Ic':100,'numPacote':10916,'idDispositivo':1}
                 if (jsonNormalized.Contains("\"Ia\"") && jsonNormalized.Contains("\"idDispositivo\""))
                 {
                     using var doc = System.Text.Json.JsonDocument.Parse(jsonNormalized);
@@ -273,10 +341,10 @@ public class BroadcastReceiverService : BackgroundService
 
                     var data = System.Text.Json.JsonSerializer.Serialize(new
                     {
-                        Voltage = 220.0,   // não fornecido pelo dispositivo
+                        Voltage = 220.0,
                         Current = current,
-                        Frequency = 60.0,    // não fornecido pelo dispositivo
-                        PowerFactor = 1.0,     // não fornecido pelo dispositivo
+                        Frequency = 60.0,
+                        PowerFactor = 1.0,
                         Status = "NORMAL",
                         Ia = ia,
                         Ib = ib,
@@ -334,38 +402,17 @@ public class BroadcastReceiverService : BackgroundService
         return true;
     }
 
-    private async Task ProcessUdpPackets(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (_udpPacketQueue.TryDequeue(out var rawPacket))
-            {
-                try
-                {
-                    var packet = BroadcastPacket.Parse(rawPacket);
-                    await _aggregationService.ProcessPacket(packet);
-                    _logger.LogInformation(
-                        "[UDP PROC] Processado — Origin={Origin} | Module={Module} | Op={Op} | Seq={Seq} | Timestamp={Ts}",
-                        packet.Origin, packet.Module, packet.OperationType, packet.Sequence, packet.Timestamp.ToString("O"));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "[UDP PROC] Erro ao processar — Raw='{Packet}'",
-                        rawPacket.Length > 200 ? rawPacket[..200] : rawPacket);
-                }
-            }
-            else
-            {
-                await Task.Delay(10, cancellationToken);
-            }
-        }
-    }
-
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("BroadcastReceiverService parando");
+        _logger.LogInformation("BroadcastReceiverService parando — encerrando todos os canais...");
         _cts.Cancel();
+
+        foreach (var channel in _deviceChannels.Values)
+            channel.Writer.TryComplete();
+
+        foreach (var channel in _module6Channels.Values)
+            channel.Writer.TryComplete();
+
         await base.StopAsync(cancellationToken);
     }
 }

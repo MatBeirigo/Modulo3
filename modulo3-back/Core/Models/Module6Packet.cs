@@ -8,37 +8,13 @@ public class Module6Packet
 
     public string RawPacket { get; set; } = string.Empty;
     public string Prefix { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Comandos (#): ID do ESP32 destinatário.
-    /// Respostas (!): ID do visualizador (quem perguntou), normalmente 00.
-    /// </summary>
     public int RecipientId { get; set; }
-
-    /// <summary>0=não config, 1=fechar relé, 2=abrir relé, 3=verificar estado, 9=configurar ID</summary>
     public Module6Command Command { get; set; }
-
-    /// <summary>
-    /// Comandos (#): "00" (placeholder).
-    /// Respostas (!): ID do ESP32 que respondeu (ex: "01").
-    /// </summary>
     public string State { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Presente apenas em respostas de estado (!visualizadorId;3;moduleId;relayState).
-    /// "00" = relé aberto, "01" = relé fechado.
-    /// </summary>
     public string? RelayState { get; set; }
-
-    /// <summary>UniqueID presente no broadcast sem config (cmd 0) e no configurar ID (cmd 9)</summary>
     public string? UniqueId { get; set; }
-
-    /// <summary>IP de origem — preenchido pelo BroadcastReceiverService</summary>
     public string? SourceIp { get; set; }
-
     public bool IsUnconfigured => Command == Module6Command.Unconfigured && UniqueId?.Length == 12;
-
-    /// <summary>Válido apenas em respostas de estado (!). Usa RelayState quando disponível.</summary>
     public bool IsRelayOpen => (RelayState ?? State) == "00";
     public bool IsRelayClosed => (RelayState ?? State) == "01";
 
@@ -65,18 +41,6 @@ public class Module6Packet
 
         var command = (Module6Command)commandInt;
         var state = parts[2];
-
-        // Respostas de estado: !00;3;01;00
-        //   parts[0] = "00"  → ID do visualizador (RecipientId)
-        //   parts[1] = "3"   → CheckState (Command)
-        //   parts[2] = "01"  → ID do ESP32 que respondeu (State)
-        //   parts[3] = "00"  → Estado do relé (RelayState)
-        //
-        // Broadcast sem config: #00;0;00;F499540B65F4
-        //   parts[3] = UniqueID (12 chars)
-        //
-        // Configurar ID: #00;9;01;F499540B65F4
-        //   parts[3] = UniqueID (12 chars)
 
         string? relayState = null;
         string? uniqueId = null;

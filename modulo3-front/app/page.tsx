@@ -23,7 +23,7 @@ import { Activity, AlertCircle, Loader2, BarChart3, Zap, Bell, Radio, History } 
 export default function Home() {
   const [isPaused, setIsPaused] = useState(false);
 
-  const { data: realTimeData, loading: rtLoading, error: rtError } = useRealTimeData(2000, isPaused);
+  const { data: realTimeData, measurementHistory, loading: rtLoading, error: rtError } = useRealTimeData(2000, isPaused);
   const { devices, loading: devicesLoading, error: devicesError } = useDevices(3000, isPaused);
   const { alarms, loading: alarmsLoading, error: alarmsError } = useAlarms(5000, isPaused);
   const { reports, loading: reportsLoading, error: reportsError } = useEventReports(5000, isPaused);
@@ -85,7 +85,7 @@ export default function Home() {
           </div>
         ) : (
           <Tabs defaultValue="visao-geral" className="space-y-6">
-            <TabsList className="grid w-full grid-cols-6 lg:w-auto">
+            <TabsList className="grid w-full grid-cols-5 lg:w-auto">
               <TabsTrigger value="visao-geral" className="flex items-center gap-2">
                 <BarChart3 className="h-4 w-4" />
                 Visão Geral
@@ -94,10 +94,10 @@ export default function Home() {
                 <Zap className="h-4 w-4" />
                 Tempo Real (M1)
               </TabsTrigger>
-              <TabsTrigger value="eventos" className="flex items-center gap-2">
+              {/* <TabsTrigger value="eventos" className="flex items-center gap-2">
                 <Activity className="h-4 w-4" />
                 Eventos (M2)
-              </TabsTrigger>
+              </TabsTrigger> */}
               <TabsTrigger value="alarmes" className="flex items-center gap-2">
                 <Bell className="h-4 w-4" />
                 Alarmes (M5)
@@ -133,7 +133,7 @@ export default function Home() {
             <TabsContent value="tempo-real" className="space-y-6">
               <section>
                 <h2 className="text-xl font-semibold mb-4">Gráficos em Tempo Real</h2>
-                <RealTimeCharts measurements={realTimeData?.measurements || []} />
+                <RealTimeCharts measurements={measurementHistory} />
               </section>
 
               <section>

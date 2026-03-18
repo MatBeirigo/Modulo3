@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiService } from '@/services/api.service';
-import { RealTimeDataResponse } from '@/types/api';
+import { MeasurementDataDto, RealTimeDataResponse } from '@/types/api';
+
+const MAX_HISTORY = 100;
 
 export function useRealTimeData(interval: number = 2000, isPaused: boolean = false) {
   const [data, setData] = useState<RealTimeDataResponse | null>(null);
+  const [measurementHistory, setMeasurementHistory] = useState<MeasurementDataDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -13,6 +16,15 @@ export function useRealTimeData(interval: number = 2000, isPaused: boolean = fal
     try {
       const response = await apiService.getRealTimeData();
       setData(response);
+      setMeasurementHistory(prev => {
+        const existingKeys = new Set(prev.map(m => `${m.deviceId}-${m.sequence}`));
+        const newPoints = response.measurements.filter(
+          m => !existingKeys.has(`${m.deviceId}-${m.sequence}`)
+        );
+        if (newPoints.length === 0) return prev;
+        const combined = [...prev, ...newPoints];
+        return combined.length > MAX_HISTORY ? combined.slice(-MAX_HISTORY) : combined;
+      });
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -23,6 +35,7 @@ export function useRealTimeData(interval: number = 2000, isPaused: boolean = fal
 
   const clear = useCallback(() => {
     setData(null);
+    setMeasurementHistory([]);
     setLoading(false);
     setError(null);
   }, []);
@@ -46,5 +59,5 @@ export function useRealTimeData(interval: number = 2000, isPaused: boolean = fal
     };
   }, [fetchData, interval, isPaused]);
 
-  return { data, loading, error, refetch: fetchData, clear };
+  return { data, measurementHistory, loading, error, refetch: fetchData, clear };
 }

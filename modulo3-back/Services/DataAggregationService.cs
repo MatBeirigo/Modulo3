@@ -74,9 +74,6 @@ public class DataAggregationService
     {
         if (packet.Prefix == Module6Packet.VisualizationPrefix && packet.Command == Module6Command.CheckState)
         {
-            // Formato: !00;3;01;00
-            //   State     = "01" → ID do ESP32 que respondeu
-            //   RelayState = "00" → estado do relé
             if (!int.TryParse(packet.State, out var moduleId) || moduleId <= 0)
             {
                 _logger.LogWarning(
